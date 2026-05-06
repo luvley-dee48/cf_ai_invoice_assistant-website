@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CF AI Invoice API Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        .section { margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
+        button { margin: 5px; padding: 8px 15px; cursor: pointer; }
+        input, textarea { width: 100%; padding: 8px; margin: 5px 0; }
+        .response { background: #f5f5f5; padding: 10px; border-radius: 3px; white-space: pre-wrap; }
+        .error { background: #ffebee; color: #c62828; }
+        .success { background: #e8f5e8; color: #2e7d32; }
+    </style>
+</head>
+<body>
+    <h1>CF AI Invoice API Test</h1>
+    
+    <div class="section">
+        <h2>1. Health Check (No Auth)</h2>
+        <button onclick="testHealth()">Test Health</button>
+        <div id="health-response" class="response"></div>
+    </div>
+
+    <div class="section">
+        <h2>2. Register User</h2>
+        <input type="email" id="reg-email" placeholder="Email" value="test@example.com">
+        <input type="text" id="reg-name" placeholder="Name" value="Test User">
+        <input type="password" id="reg-password" placeholder="Password" value="password123">
+        <button onclick="register()">Register</button>
+        <div id="register-response" class="response"></div>
+    </div>
+
+    <div class="section">
+        <h2>3. Login</h2>
+        <input type="email" id="login-email" placeholder="Email" value="test@example.com">
+        <input type="password" id="login-password" placeholder="Password" value="password123">
+        <button onclick="login()">Login</button>
+        <div id="login-response" class="response"></div>
+    </div>
+
+    <div class="section">
+        <h2>4. Test Protected Endpoints (Requires Token)</h2>
+        <textarea id="jwt-token" placeholder="JWT token will appear here after login" rows="3"></textarea>
+        <br>
+        <button onclick="getUserProfile()">Get User Profile</button>
+        <button onclick="createConversation()">Create Conversation</button>
+        <button onclick="sendMessage()">Send Test Message</button>
+        <div id="protected-response" class="response"></div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:8787';
+        
+        async function makeRequest(url, options = {}) {
+            try {
+                const response = await fetch(API_BASE + url, {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...options.headers
+                    },
+                    ...options
+                });
+                const data = await response.json();
+                return { success: response.ok, data, status: response.status };
+            } catch (error) {
+                return { success: false, data: { error: error.message }, status: 0 };
+            }
+        }
+
+        function displayResponse(elementId, result) {
+            const element = document.getElementById(elementId);
+            element.className = `response ${result.success ? 'success' : 'error'}`;
+            element.textContent = JSON.stringify(result.data, null, 2);
+        }
+
+        async function testHealth() {
+            const result = await makeRequest('/health');
+            displayResponse('health-response', result);
+        }
+
+        async function register() {
+            const email = document.getElementById('reg-email').value;
+            const name = document.getElementById('reg-name').value;
+            const password = document.getElementById('reg-password').value;
+            
+            const result = await makeRequest('/auth/register', {
+                method: 'POST',
+                body: JSON.stringify({ email, name, password })
+            });
+            displayResponse('register-response', result);
+        }
+
+        async function login() {
+            const email = document.getElementById('login-email').value;
+            const password = document.getElementById('login-password').value;
+            
+            const result = await makeRequest('/auth/login', {
+                method: 'POST',
+                body: JSON.stringify({ email, password })
+            });
+            displayResponse('login-response', result);
+            
+            if (result.success && result.data.token) {
+                document.getElementById('jwt-token').value = result.data.token;
+            }
+        }
+
+        async function getUserProfile() {
+            const token = document.getElementById('jwt-token').value;
+            if (!token) {
+                displayResponse('protected-response', { success: false, data: { error: 'Please login first' } });
+                return;
+            }
+            
+            const result = await makeRequest('/user/profile', {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            displayResponse('protected-response', result);
+        }
+
+        async function createConversation() {
+            const token = document.getElementById('jwt-token').value;
+            if (!token) {
+                displayResponse('protected-response', { success: false, data: { error: 'Please login first' } });
+                return;
+            }
+            
+            const result = await makeRequest('/chat/conversation', {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${token}` },
+                body: JSON.stringify({})
+            });
+            displayResponse('protected-response', result);
+        }
+
+        async function sendMessage() {
+            const token = document.getElementById('jwt-token').value;
+            if (!token) {
+                displayResponse('protected-response', { success: false, data: { error: 'Please login first' } });
+                return;
+            }
+            
+            // First create a conversation
+            const convResult = await makeRequest('/chat/conversation', {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${token}` },
+                body: JSON.stringify({})
+            });
+            
+            if (!convResult.success) {
+                displayResponse('protected-response', convResult);
+                return;
+            }
+            
+            // Then send a message
+            const result = await makeRequest('/chat/message', {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${token}` },
+                body: JSON.stringify({
+                    conversationId: convResult.data.id,
+                    message: "Hello, can you help me process an invoice?"
+                })
+            });
+            displayResponse('protected-response', result);
+        }
+    </script>
+</body>
+</html>

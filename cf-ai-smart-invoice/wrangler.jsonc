@@ -10,7 +10,9 @@
 	"migrations": [
 		{
 			"new_sqlite_classes": [
-				"MyDurableObject"
+				"UserDurableObject",
+				"ChatDurableObject",
+				"WorkflowDurableObject"
 			],
 			"tag": "v1"
 		}
@@ -18,10 +20,24 @@
 	"durable_objects": {
 		"bindings": [
 			{
-				"class_name": "MyDurableObject",
-				"name": "MY_DURABLE_OBJECT"
+				"class_name": "UserDurableObject",
+				"name": "USER_DURABLE_OBJECT",
+				"script_name": "cf-ai-smart-invoice"
+			},
+			{
+				"class_name": "ChatDurableObject",
+				"name": "CHAT_DURABLE_OBJECT",
+				"script_name": "cf-ai-smart-invoice"
+			},
+			{
+				"class_name": "WorkflowDurableObject",
+				"name": "WORKFLOW_DURABLE_OBJECT",
+				"script_name": "cf-ai-smart-invoice"
 			}
 		]
+	},
+	"ai": {
+		"binding": "AI"
 	},
 	"observability": {
 		"enabled": true
