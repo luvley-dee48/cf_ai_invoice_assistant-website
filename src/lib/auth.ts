@@ -36,9 +36,131 @@ export interface AuthResponse {
 const TOKEN_KEY = 'auth_token';
 const USER_KEY = 'auth_user';
 
+// Base64url decode helper for JWT parsing
+const base64urlDecode = (str: string): string => {
+  try {
+    // Validate input
+    if (!str || typeof str !== 'string') {
+      throw new Error('Invalid input: token part is not a string');
+    }
+    
+    // Add padding if needed
+    const padded = str + new Array(5 - str.length % 4).join('=');
+    
+    // Replace base64url characters with base64 characters
+    const base64 = padded.replace(/\-/g, '+').replace(/_/g, '/');
+    
+    // Decode
+    return atob(base64);
+  } catch (error) {
+    console.error('Base64url decode error:', error);
+    throw new Error(`Failed to decode token: ${error.message}`);
+  }
+};
+
+// Check if JWT token is expired
+export const isTokenExpired = (token: string): boolean => {
+  try {
+    // Validate token format
+    if (!token || typeof token !== 'string') {
+      console.log('Token validation: Invalid token format');
+      return true;
+    }
+    
+    // Check for basic JWT structure before splitting
+    if (!token.includes('.') || token.split('.').length !== 3) {
+      console.log('Token validation: Invalid JWT structure');
+      return true;
+    }
+    
+    const parts = token.split('.');
+    if (parts.length !== 3) {
+      console.log('Token validation: Invalid JWT structure, expected 3 parts, got', parts.length);
+      return true;
+    }
+    
+    // Check if payload part is empty or contains invalid characters
+    if (!parts[1] || parts[1].length === 0) {
+      console.log('Token validation: Empty payload');
+      return true;
+    }
+    
+    // Validate payload contains only valid base64url characters
+    const payloadPart = parts[1];
+    const validBase64UrlRegex = /^[A-Za-z0-9_-]*$/;
+    if (!validBase64UrlRegex.test(payloadPart)) {
+      console.log('Token validation: Payload contains invalid characters');
+      return true;
+    }
+    
+    const payload = JSON.parse(base64urlDecode(parts[1]));
+    const currentTime = Math.floor(Date.now() / 1000);
+    
+    // Check if expiration exists
+    if (!payload.exp) {
+      console.log('Token validation: No expiration claim found');
+      return true; // Treat as expired if no exp claim
+    }
+    
+    const isExpired = payload.exp < currentTime;
+    console.log('Token validation:', {
+      exp: payload.exp,
+      currentTime,
+      isExpired,
+      timeUntilExpiry: payload.exp - currentTime
+    });
+    
+    return isExpired;
+  } catch (error) {
+    console.error('Error parsing token:', error);
+    // If we can't parse the token, it's definitely invalid
+    return true;
+  }
+};
+
 export const getStoredToken = (): string | null => {
   const token = localStorage.getItem(TOKEN_KEY);
   console.log('getStoredToken - Retrieved:', token ? token.substring(0, 20) + '...' : 'null');
+  
+  // Validate token format before returning
+  if (token) {
+    try {
+      // Basic structure validation
+      if (!token.includes('.') || token.split('.').length !== 3) {
+        console.log('getStoredToken - Invalid token structure, clearing corrupted token');
+        clearAuthData();
+        return null;
+      }
+      
+      const parts = token.split('.');
+      if (parts.length !== 3) {
+        console.log('getStoredToken - Invalid token format, clearing corrupted token');
+        clearAuthData();
+        return null;
+      }
+      
+      // Check payload part for valid base64url characters
+      const payloadPart = parts[1];
+      if (!payloadPart || payloadPart.length === 0) {
+        console.log('getStoredToken - Empty payload, clearing corrupted token');
+        clearAuthData();
+        return null;
+      }
+      
+      const validBase64UrlRegex = /^[A-Za-z0-9_-]*$/;
+      if (!validBase64UrlRegex.test(payloadPart)) {
+        console.log('getStoredToken - Invalid characters in payload, clearing corrupted token');
+        clearAuthData();
+        return null;
+      }
+      
+    } catch (error) {
+      console.log('getStoredToken - Error validating token, clearing corrupted token:', error);
+      clearAuthData();
+      return null;
+    }
+  }
+  
   return token;
 };
 
@@ -58,6 +180,19 @@ export const setAuthData = (token: string, user: User): void => {
 export const clearAuthData = (): void => {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(USER_KEY);
+};
+
+// Force clear all auth data - useful for troubleshooting corrupted tokens
+export const forceClearAuthData = (): void => {
+  console.log('Force clearing all auth data...');
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(USER_KEY);
+  // Also try to clear any other potential auth-related keys
+  localStorage.removeItem('auth_token');
+  localStorage.removeItem('auth_user');
+  localStorage.removeItem('token');
+  localStorage.removeItem('user');
+  console.log('Auth data cleared');
 };
 
 // API functions
@@ -150,6 +285,14 @@ export const authenticatedFetch = async (endpoint: string, options: RequestInit 
     window.location.href = '/login';
     throw new Error('No authentication token found');
   }
+
+  // Check if token is expired before making the request
+  if (isTokenExpired(token)) {
+    console.error('Token expired, clearing auth data');
+    clearAuthData();
+    window.location.href = '/login';
+    throw new Error('Token expired');
+  }
   
   const response = await fetch(`${API_BASE_URL}${endpoint}`, {
     ...options,
@@ -163,7 +306,7 @@ export const authenticatedFetch = async (endpoint: string, options: RequestInit 
   if (!response.ok) {
     console.error(`Request failed: ${response.status} ${response.statusText}`);
     if (response.status === 401) {
-      // Token expired, clear auth data
+      // Token expired or invalid, clear auth data
       clearAuthData();
       window.location.href = '/login';
     }

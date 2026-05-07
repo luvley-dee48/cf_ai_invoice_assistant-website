@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Navigate } from 'react-router-dom';
-import { getStoredToken, getStoredUser } from '@/lib/auth';
+import { getStoredToken, getStoredUser, clearAuthData, isTokenExpired } from '@/lib/auth';
 
 interface ProtectedRouteProps {
   children: React.ReactNode;
@@ -19,13 +19,25 @@ export default function ProtectedRoute({ children }: ProtectedRouteProps) {
         console.log('ProtectedRoute - Token:', token ? 'exists' : 'missing');
         console.log('ProtectedRoute - User:', user ? 'exists' : 'missing');
         
-        // Simple check - if token and user exist, consider authenticated
-        const authenticated = !!(token && user);
+        // Enhanced validation: check if token and user exist AND token is not expired
+        let authenticated = false;
+        
+        if (token && user) {
+          if (isTokenExpired(token)) {
+            console.log('ProtectedRoute - Token expired, clearing auth data');
+            clearAuthData();
+            authenticated = false;
+          } else {
+            authenticated = true;
+          }
+        }
         
         setIsAuthenticated(authenticated);
         setIsLoading(false);
       } catch (error) {
         console.error('ProtectedRoute - Auth check error:', error);
+        // Clear any potentially corrupted auth data
+        clearAuthData();
         setIsAuthenticated(false);
         setIsLoading(false);
       }
