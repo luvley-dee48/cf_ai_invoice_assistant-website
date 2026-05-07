@@ -13,7 +13,7 @@ const JWT_ALGORITHM = 'HS256';
  * @param {string} payload.plan - User plan (free/pro)
  * @returns {string} JWT token
  */
-export function generateJWT(payload) {
+export async function generateJWT(payload) {
 	const header = {
 		alg: JWT_ALGORITHM,
 		typ: 'JWT'
@@ -30,7 +30,7 @@ export function generateJWT(payload) {
 	const encodedPayload = base64urlEncode(JSON.stringify(jwtPayload));
 	const signatureInput = `${encodedHeader}.${encodedPayload}`;
 	
-	const signature = sign(signatureInput, JWT_SECRET);
+	const signature = await sign(signatureInput, JWT_SECRET);
 	
 	return `${signatureInput}.${signature}`;
 }
@@ -40,7 +40,7 @@ export function generateJWT(payload) {
  * @param {string} token - JWT token to verify
  * @returns {Object|null} Decoded payload or null if invalid
  */
-export function verifyJWT(token) {
+export async function verifyJWT(token) {
 	try {
 		const parts = token.split('.');
 		if (parts.length !== 3) return null;
@@ -48,7 +48,7 @@ export function verifyJWT(token) {
 		const [header, payload, signature] = parts;
 		const signatureInput = `${header}.${payload}`;
 		
-		const expectedSignature = sign(signatureInput, JWT_SECRET);
+		const expectedSignature = await sign(signatureInput, JWT_SECRET);
 		if (signature !== expectedSignature) return null;
 
 		const decodedPayload = JSON.parse(base64urlDecode(payload));
@@ -66,28 +66,25 @@ export function verifyJWT(token) {
  * Simple HMAC-SHA256 signing function
  * @param {string} data - Data to sign
  * @param {string} secret - Secret key
- * @returns {string} Signature
+ * @returns {Promise<string>} Signature
  */
-function sign(data, secret) {
+async function sign(data, secret) {
 	const encoder = new TextEncoder();
 	const keyData = encoder.encode(secret);
 	const messageData = encoder.encode(data);
 	
-	return crypto.subtle.sign(
-		'HMAC',
-		crypto.subtle.importKey(
-			'raw',
-			keyData,
-			{ name: 'HMAC', hash: 'SHA-256' },
-			false,
-			['sign']
-		),
-		messageData
-	).then(signature => {
-		return Array.from(new Uint8Array(signature))
-			.map(b => b.toString(16).padStart(2, '0'))
-			.join('');
-	});
+	const key = await crypto.subtle.importKey(
+		'raw',
+		keyData,
+		{ name: 'HMAC', hash: 'SHA-256' },
+		false,
+		['sign']
+	);
+	
+	const signature = await crypto.subtle.sign('HMAC', key, messageData);
+	return Array.from(new Uint8Array(signature))
+		.map(b => b.toString(16).padStart(2, '0'))
+		.join('');
 }
 
 /**
@@ -122,7 +119,7 @@ export async function authenticate(request) {
 	if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
 	
 	const token = authHeader.substring(7);
-	return verifyJWT(token);
+	return await verifyJWT(token);
 }
 
 /**

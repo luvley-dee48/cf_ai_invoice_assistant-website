@@ -16,6 +16,7 @@ import Memory from "./pages/dashboard/Memory";
 import Tasks from "./pages/dashboard/Tasks";
 import Settings from "./pages/dashboard/Settings";
 import Billing from "./pages/dashboard/Billing";
+import ProtectedRoute from "./components/auth/ProtectedRoute";
 
 const queryClient = new QueryClient();
 
@@ -30,7 +31,11 @@ const App = () => (
           <Route path="/login" element={<Login />} />
           <Route path="/signup" element={<Signup />} />
           <Route path="/forgot-password" element={<ForgotPassword />} />
-          <Route path="/app" element={<DashboardLayout />}>
+          <Route path="/app" element={
+            <ProtectedRoute>
+              <DashboardLayout />
+            </ProtectedRoute>
+          }>
             <Route index element={<Overview />} />
             <Route path="chat" element={<Chat />} />
             <Route path="tracker" element={<Tracker />} />

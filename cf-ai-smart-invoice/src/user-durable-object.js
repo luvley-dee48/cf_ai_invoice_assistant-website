@@ -60,7 +60,7 @@ export class UserDurableObject {
 		await this.users.put(`user_id:${userId}`, JSON.stringify(user));
 
 		// Generate JWT token
-		const token = generateJWT({
+		const token = await generateJWT({
 			id: userId,
 			email,
 			plan: user.plan
@@ -103,7 +103,7 @@ export class UserDurableObject {
 		}
 
 		// Generate JWT token
-		const token = generateJWT({
+		const token = await generateJWT({
 			id: user.id,
 			email,
 			plan: user.plan
