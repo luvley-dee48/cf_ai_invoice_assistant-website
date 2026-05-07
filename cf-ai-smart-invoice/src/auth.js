@@ -29,9 +29,9 @@ export async function generateJWT(payload) {
 	const encodedHeader = base64urlEncode(JSON.stringify(header));
 	const encodedPayload = base64urlEncode(JSON.stringify(jwtPayload));
 	const signatureInput = `${encodedHeader}.${encodedPayload}`;
-	
+
 	const signature = await sign(signatureInput, JWT_SECRET);
-	
+
 	return `${signatureInput}.${signature}`;
 }
 
@@ -47,17 +47,18 @@ export async function verifyJWT(token) {
 
 		const [header, payload, signature] = parts;
 		const signatureInput = `${header}.${payload}`;
-		
+
 		const expectedSignature = await sign(signatureInput, JWT_SECRET);
 		if (signature !== expectedSignature) return null;
 
 		const decodedPayload = JSON.parse(base64urlDecode(payload));
 		const now = Math.floor(Date.now() / 1000);
-		
+
 		if (decodedPayload.exp && decodedPayload.exp < now) return null;
-		
+
 		return decodedPayload;
 	} catch (error) {
+		console.error('verifyJWT error:', error);
 		return null;
 	}
 }
@@ -72,7 +73,7 @@ async function sign(data, secret) {
 	const encoder = new TextEncoder();
 	const keyData = encoder.encode(secret);
 	const messageData = encoder.encode(data);
-	
+
 	const key = await crypto.subtle.importKey(
 		'raw',
 		keyData,
@@ -80,7 +81,7 @@ async function sign(data, secret) {
 		false,
 		['sign']
 	);
-	
+
 	const signature = await crypto.subtle.sign('HMAC', key, messageData);
 	return Array.from(new Uint8Array(signature))
 		.map(b => b.toString(16).padStart(2, '0'))
@@ -101,12 +102,16 @@ function base64urlEncode(str) {
 
 /**
  * Base64URL decode a string
+ * Fix: use correct padding formula — (4 - len % 4) % 4
+ * The old formula `new Array(5 - len % 4).join('=')` produced wrong padding
+ * when len % 4 === 0, adding 4 '=' chars instead of 0, breaking atob().
  * @param {string} str - Base64URL encoded string
  * @returns {string} Decoded string
  */
 function base64urlDecode(str) {
-	str += new Array(5 - str.length % 4).join('=');
-	return atob(str.replace(/\-/g, '+').replace(/_/g, '/'));
+	// Correct padding: add 0, 1, 2 or 3 '=' chars as needed
+	const padded = str + '='.repeat((4 - str.length % 4) % 4);
+	return atob(padded.replace(/-/g, '+').replace(/_/g, '/'));
 }
 
 /**
@@ -117,7 +122,7 @@ function base64urlDecode(str) {
 export async function authenticate(request) {
 	const authHeader = request.headers.get('Authorization');
 	if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
-	
+
 	const token = authHeader.substring(7);
 	return await verifyJWT(token);
 }

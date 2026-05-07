@@ -1,6 +1,6 @@
 /**
  * Chat Durable Object
- * Handles AI chat sessions, memory, and conversation history
+ * Handles AI chat sessions, memory, conversation history, and tasks
  */
 
 export class ChatDurableObject {
@@ -8,66 +8,51 @@ export class ChatDurableObject {
 		this.ctx = ctx;
 		this.env = env;
 		this.storage = this.ctx.storage;
-		this.conversations = new Map(); // In-memory conversation cache
+		this.conversations = new Map();
 	}
 
-	/**
-	 * Initialize the chat session
-	 * @param {string} userId - User ID
-	 * @param {string} conversationId - Conversation ID
-	 * @returns {Promise<Object>} Initialized conversation
-	 */
 	async initializeConversation(userId, conversationId = null) {
 		const convId = conversationId || crypto.randomUUID();
 		const conversationKey = `conversation:${userId}:${convId}`;
-		
+
+		const existing = await this.storage.get(conversationKey);
+		if (existing) {
+			const parsed = JSON.parse(existing);
+			this.conversations.set(convId, parsed);
+			return parsed;
+		}
+
 		const conversation = {
 			id: convId,
 			userId,
 			messages: [],
 			createdAt: new Date().toISOString(),
 			updatedAt: new Date().toISOString(),
-			context: {
-				goal: '',
-				customContext: []
-			}
+			context: { goal: '', customContext: [] }
 		};
 
 		await this.storage.put(conversationKey, JSON.stringify(conversation));
 		this.conversations.set(convId, conversation);
-
 		return conversation;
 	}
 
-	/**
-	 * Get conversation by ID
-	 * @param {string} userId - User ID
-	 * @param {string} conversationId - Conversation ID
-	 * @returns {Promise<Object|null>} Conversation data
-	 */
 	async getConversation(userId, conversationId) {
 		const conversationKey = `conversation:${userId}:${conversationId}`;
 		const convStr = await this.storage.get(conversationKey);
-		
 		if (!convStr) return null;
-		
 		const conversation = JSON.parse(convStr);
 		this.conversations.set(conversationId, conversation);
 		return conversation;
 	}
 
-	/**
-	 * Add message to conversation
-	 * @param {string} userId - User ID
-	 * @param {string} conversationId - Conversation ID
-	 * @param {Object} message - Message data
-	 * @returns {Promise<Object>} Updated conversation
-	 */
+	async getOrCreateConversation(userId, conversationId) {
+		const existing = await this.getConversation(userId, conversationId);
+		if (existing) return existing;
+		return this.initializeConversation(userId, conversationId);
+	}
+
 	async addMessage(userId, conversationId, message) {
-		const conversation = await this.getConversation(userId, conversationId);
-		if (!conversation) {
-			throw new Error('Conversation not found');
-		}
+		const conversation = await this.getOrCreateConversation(userId, conversationId);
 
 		const messageWithTimestamp = {
 			...message,
@@ -81,76 +66,81 @@ export class ChatDurableObject {
 		const conversationKey = `conversation:${userId}:${conversationId}`;
 		await this.storage.put(conversationKey, JSON.stringify(conversation));
 		this.conversations.set(conversationId, conversation);
-
 		return conversation;
 	}
 
-	/**
-	 * Generate AI response using Workers AI
-	 * @param {string} userId - User ID
-	 * @param {string} conversationId - Conversation ID
-	 * @param {string} userMessage - User message
-	 * @returns {Promise<string>} AI response
-	 */
 	async generateAIResponse(userId, conversationId, userMessage) {
-		const conversation = await this.getConversation(userId, conversationId);
-		if (!conversation) {
-			throw new Error('Conversation not found');
+		// Check AI binding
+		if (!this.env.AI) {
+			throw new Error(
+				'Workers AI binding (AI) is not configured. ' +
+				'Add "ai": { "binding": "AI" } to wrangler.jsonc and ensure you are running ' +
+				'`wrangler dev --remote` (local mode does not support Workers AI).'
+			);
 		}
 
-		// Build conversation context for AI
+		const conversation = await this.getOrCreateConversation(userId, conversationId);
+
 		const messages = [
 			{
 				role: 'system',
 				content: `You are Mentic, an AI assistant for invoice management and business productivity. 
-				Help users with invoice processing, business tasks, and productivity. 
-				Be helpful, concise, and professional. Current context: ${JSON.stringify(conversation.context)}`
+Help users with invoice processing, business tasks, and productivity. 
+Be helpful, concise, and professional.
+Current context: ${JSON.stringify(conversation.context)}`
 			},
-			...conversation.messages.map(msg => ({
+			// Cap at last 20 messages to stay within context limits
+			...conversation.messages.slice(-20).map(msg => ({
 				role: msg.from === 'user' ? 'user' : 'assistant',
 				content: msg.text
 			})),
-			{
-				role: 'user',
-				content: userMessage
-			}
+			{ role: 'user', content: userMessage }
 		];
 
-		try {
-			// Use Cloudflare Workers AI with Llama 3.3
-			const aiResponse = await this.env.AI.run('@cf/meta/llama-3.3-70b-instruct', {
-				messages: messages,
-				max_tokens: 1000,
-				temperature: 0.7
-			});
+		// Try models in order of preference
+		const models = [
+			'@cf/meta/llama-3.3-70b-instruct-fp8-fast',
+			'@cf/meta/llama-3.1-8b-instruct',
+			'@cf/meta/llama-2-7b-chat-int8',
+		];
 
-			return aiResponse.response;
-		} catch (error) {
-			console.error('AI generation error:', error);
-			// Fallback response
-			return 'I apologize, but I\'m having trouble processing your request right now. Please try again.';
+		let lastError = null;
+		for (const model of models) {
+			try {
+				console.log(`[AI] Trying model: ${model}`);
+				const aiResponse = await this.env.AI.run(model, {
+					messages,
+					max_tokens: 1000,
+					temperature: 0.7
+				});
+
+				if (aiResponse?.response) {
+					console.log(`[AI] Success with: ${model}`);
+					return aiResponse.response;
+				}
+				throw new Error(`Model ${model} returned empty response`);
+			} catch (err) {
+				console.error(`[AI] Model ${model} failed:`, err.message);
+				lastError = err;
+			}
 		}
+
+		throw lastError || new Error('All AI models failed');
 	}
 
-	/**
-	 * Save conversation to memory
-	 * @param {string} userId - User ID
-	 * @param {string} conversationId - Conversation ID
-	 * @param {string} title - Memory title
-	 * @returns {Promise<Object>} Memory entry
-	 */
 	async saveToMemory(userId, conversationId, title) {
 		const conversation = await this.getConversation(userId, conversationId);
 		if (!conversation) {
-			throw new Error('Conversation not found');
+			throw new Error(`Conversation "${conversationId}" not found for user ${userId}`);
 		}
 
-		const memoryKey = `memory:${userId}:${crypto.randomUUID()}`;
+		const memoryId = crypto.randomUUID();
+		const memoryKey = `memory:${userId}:${memoryId}`;
 		const memory = {
-			id: memoryKey.split(':')[2],
+			id: memoryId,
 			userId,
 			conversationId,
-			title,
+			title: title || `Saved on ${new Date().toLocaleDateString()}`,
 			content: conversation.messages,
 			createdAt: new Date().toISOString(),
 			tags: this.extractTags(conversation.messages)
@@ -160,95 +150,91 @@ export class ChatDurableObject {
 		return memory;
 	}
 
-	/**
-	 * Get user memories
-	 * @param {string} userId - User ID
-	 * @returns {Promise<Array>} Array of memories
-	 */
 	async getMemories(userId) {
 		const memories = [];
 		const memoryKeys = await this.storage.list({ prefix: `memory:${userId}:` });
-		
+
 		for (const key of memoryKeys.keys) {
 			const memoryStr = await this.storage.get(key.name);
-			if (memoryStr) {
-				memories.push(JSON.parse(memoryStr));
-			}
+			if (memoryStr) memories.push(JSON.parse(memoryStr));
 		}
 
 		return memories.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 	}
 
-	/**
-	 * Update conversation context
-	 * @param {string} userId - User ID
-	 * @param {string} conversationId - Conversation ID
-	 * @param {Object} context - Context updates
-	 * @returns {Promise<Object>} Updated conversation
-	 */
-	async updateContext(userId, conversationId, context) {
-		const conversation = await this.getConversation(userId, conversationId);
-		if (!conversation) {
-			throw new Error('Conversation not found');
+	async createTask(userId, taskData) {
+		const taskId = crypto.randomUUID();
+		const taskKey = `task:${userId}:${taskId}`;
+		const task = {
+			id: taskId,
+			userId,
+			title: taskData.title || 'Untitled Task',
+			description: taskData.description || '',
+			status: 'pending',
+			priority: taskData.priority || 'medium',
+			dueDate: taskData.dueDate || null,
+			conversationId: taskData.conversationId || null,
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
+		};
+
+		await this.storage.put(taskKey, JSON.stringify(task));
+		return task;
+	}
+
+	async getTasks(userId) {
+		const tasks = [];
+		const taskKeys = await this.storage.list({ prefix: `task:${userId}:` });
+
+		for (const key of taskKeys.keys) {
+			const taskStr = await this.storage.get(key.name);
+			if (taskStr) tasks.push(JSON.parse(taskStr));
 		}
 
+		return tasks.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+	}
+
+	async updateContext(userId, conversationId, context) {
+		const conversation = await this.getOrCreateConversation(userId, conversationId);
 		conversation.context = { ...conversation.context, ...context };
 		conversation.updatedAt = new Date().toISOString();
 
 		const conversationKey = `conversation:${userId}:${conversationId}`;
 		await this.storage.put(conversationKey, JSON.stringify(conversation));
 		this.conversations.set(conversationId, conversation);
-
 		return conversation;
 	}
 
-	/**
-	 * Extract tags from conversation messages
-	 * @param {Array} messages - Conversation messages
-	 * @returns {Array} Extracted tags
-	 */
 	extractTags(messages) {
-		const text = messages.map(m => m.text).join(' ').toLowerCase();
-		const tags = [];
-
-		// Common business/invoice related tags
+		const text = messages.map(m => m.text || '').join(' ').toLowerCase();
 		const tagKeywords = {
-			'invoice': ['invoice', 'billing', 'payment', 'receipt'],
-			'client': ['client', 'customer', 'account'],
-			'project': ['project', 'task', 'work'],
-			'meeting': ['meeting', 'call', 'discussion'],
-			'deadline': ['deadline', 'due', 'schedule'],
-			'proposal': ['proposal', 'quote', 'estimate']
+			invoice: ['invoice', 'billing', 'payment', 'receipt'],
+			client: ['client', 'customer', 'account'],
+			project: ['project', 'task', 'work'],
+			meeting: ['meeting', 'call', 'discussion'],
+			deadline: ['deadline', 'due', 'schedule'],
+			proposal: ['proposal', 'quote', 'estimate']
 		};
 
-		for (const [tag, keywords] of Object.entries(tagKeywords)) {
-			if (keywords.some(keyword => text.includes(keyword))) {
-				tags.push(tag);
-			}
-		}
-
-		return tags;
+		return Object.entries(tagKeywords)
+			.filter(([, keywords]) => keywords.some(k => text.includes(k)))
+			.map(([tag]) => tag);
 	}
 
-	/**
-	 * Get user conversations
-	 * @param {string} userId - User ID
-	 * @returns {Promise<Array>} Array of conversations
-	 */
 	async getUserConversations(userId) {
-		const conversations = [];
 		const convKeys = await this.storage.list({ prefix: `conversation:${userId}:` });
-		
+		const conversations = [];
+
 		for (const key of convKeys.keys) {
 			const convStr = await this.storage.get(key.name);
 			if (convStr) {
-				const conversation = JSON.parse(convStr);
+				const c = JSON.parse(convStr);
 				conversations.push({
-					id: conversation.id,
-					createdAt: conversation.createdAt,
-					updatedAt: conversation.updatedAt,
-					messageCount: conversation.messages.length,
-					lastMessage: conversation.messages[conversation.messages.length - 1]?.text || ''
+					id: c.id,
+					createdAt: c.createdAt,
+					updatedAt: c.updatedAt,
+					messageCount: c.messages.length,
+					lastMessage: c.messages[c.messages.length - 1]?.text || ''
 				});
 			}
 		}
@@ -256,102 +242,113 @@ export class ChatDurableObject {
 		return conversations.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
 	}
 
-	/**
-	 * Handle incoming requests
-	 * @param {Request} request - Incoming request
-	 * @returns {Promise<Response>} Response
-	 */
 	async fetch(request) {
 		const url = new URL(request.url);
 		const path = url.pathname;
 		const userId = url.searchParams.get('userId');
 
 		if (!userId) {
-			return new Response('User ID required', { status: 400 });
+			return jsonResponse({ error: 'userId query param is required' }, 400);
 		}
 
 		try {
-			switch (path) {
-				case '/conversation':
-					if (request.method === 'POST') {
-						const { conversationId } = await request.json();
-						const conversation = await this.initializeConversation(userId, conversationId);
-						return new Response(JSON.stringify(conversation), {
-							headers: { 'Content-Type': 'application/json' }
-						});
-					} else if (request.method === 'GET') {
-						const conversations = await this.getUserConversations(userId);
-						return new Response(JSON.stringify(conversations), {
-							headers: { 'Content-Type': 'application/json' }
-						});
-					}
-					break;
-
-				case '/message':
-					if (request.method !== 'POST') {
-						return new Response('Method not allowed', { status: 405 });
-					}
-					const messageData = await request.json();
-					const convId = messageData.conversationId;
-					const userMessage = messageData.message;
-					
-					// Add user message
-					await this.addMessage(userId, convId, {
-						from: 'user',
-						text: userMessage
-					});
-
-					// Generate AI response
-					const aiResponse = await this.generateAIResponse(userId, convId, userMessage);
-					
-					// Add AI response
-					const updatedConv = await this.addMessage(userId, convId, {
-						from: 'ai',
-						text: aiResponse
-					});
-
-					return new Response(JSON.stringify({ 
-						response: aiResponse,
-						conversation: updatedConv
-					}), {
-						headers: { 'Content-Type': 'application/json' }
-					});
-
-				case '/memory':
-					if (request.method === 'POST') {
-						const { conversationId, title } = await request.json();
-						const memory = await this.saveToMemory(userId, conversationId, title);
-						return new Response(JSON.stringify(memory), {
-							headers: { 'Content-Type': 'application/json' }
-						});
-					} else if (request.method === 'GET') {
-						const memories = await this.getMemories(userId);
-						return new Response(JSON.stringify(memories), {
-							headers: { 'Content-Type': 'application/json' }
-						});
-					}
-					break;
-
-				case '/context':
-					if (request.method !== 'PUT') {
-						return new Response('Method not allowed', { status: 405 });
-					}
-					const contextData = await request.json();
-					const convIdForContext = contextData.conversationId;
-					const contextUpdate = contextData.context;
-					const updatedConvContext = await this.updateContext(userId, convIdForContext, contextUpdate);
-					return new Response(JSON.stringify(updatedConvContext), {
-						headers: { 'Content-Type': 'application/json' }
-					});
-
-				default:
-					return new Response('Not found', { status: 404 });
+			// ── /conversation ──────────────────────────────────────────────────
+			if (path === '/conversation') {
+				if (request.method === 'POST') {
+					const { conversationId } = await request.json();
+					const conv = await this.initializeConversation(userId, conversationId);
+					return jsonResponse(conv);
+				}
+				if (request.method === 'GET') {
+					const convs = await this.getUserConversations(userId);
+					return jsonResponse(convs);
+				}
 			}
+
+			// ── /message ───────────────────────────────────────────────────────
+			if (path === '/message') {
+				if (request.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, 405);
+
+				const body = await request.json();
+				const { conversationId, message, attachments = [] } = body;
+
+				if (!conversationId || !message) {
+					return jsonResponse({ error: 'conversationId and message are required' }, 400);
+				}
+
+				await this.getOrCreateConversation(userId, conversationId);
+
+				// Store user message (metadata only for attachments)
+				const attachmentMeta = attachments.map(a => ({ name: a.name, type: a.type }));
+				await this.addMessage(userId, conversationId, {
+					from: 'user',
+					text: message,
+					...(attachmentMeta.length > 0 && { attachments: attachmentMeta }),
+				});
+
+				// Generate AI response
+				let aiText;
+				try {
+					aiText = await this.generateAIResponse(userId, conversationId, message);
+				} catch (aiError) {
+					console.error('[AI] Generation failed:', aiError.message);
+					return jsonResponse({ error: 'AI_ERROR', message: aiError.message }, 502);
+				}
+
+				const updatedConv = await this.addMessage(userId, conversationId, { from: 'ai', text: aiText });
+				return jsonResponse({ response: aiText, conversation: updatedConv });
+			}
+
+			// ── /memory ────────────────────────────────────────────────────────
+			if (path === '/memory') {
+				if (request.method === 'POST') {
+					const { conversationId, title } = await request.json();
+					if (!conversationId) return jsonResponse({ error: 'conversationId is required' }, 400);
+					const memory = await this.saveToMemory(userId, conversationId, title);
+					return jsonResponse(memory);
+				}
+				if (request.method === 'GET') {
+					const memories = await this.getMemories(userId);
+					return jsonResponse(memories);
+				}
+			}
+
+			// ── /task ──────────────────────────────────────────────────────────
+			if (path === '/task') {
+				if (request.method === 'POST') {
+					const taskData = await request.json();
+					const task = await this.createTask(userId, taskData);
+					return jsonResponse(task);
+				}
+				if (request.method === 'GET') {
+					const tasks = await this.getTasks(userId);
+					return jsonResponse(tasks);
+				}
+			}
+
+			// ── /context ───────────────────────────────────────────────────────
+			if (path === '/context') {
+				if (request.method !== 'PUT') return jsonResponse({ error: 'Method not allowed' }, 405);
+
+				const body = await request.json();
+				const { conversationId, context, ...flatContext } = body;
+				const contextUpdate = context || flatContext;
+				const updated = await this.updateContext(userId, conversationId, contextUpdate);
+				return jsonResponse(updated);
+			}
+
+			return jsonResponse({ error: 'Not found' }, 404);
+
 		} catch (error) {
-			return new Response(JSON.stringify({ error: error.message }), {
-				status: 400,
-				headers: { 'Content-Type': 'application/json' }
-			});
+			console.error('[ChatDurableObject] Unhandled error:', error);
+			return jsonResponse({ error: error.message }, 500);
 		}
 	}
+}
+
+function jsonResponse(data, status = 200) {
+	return new Response(JSON.stringify(data), {
+		status,
+		headers: { 'Content-Type': 'application/json' }
+	});
 }
